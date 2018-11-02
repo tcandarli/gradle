@@ -19,16 +19,53 @@ package org.gradle.plugins.performance
 import org.gradle.api.DefaultTask
 import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.TaskAction
-import org.gradle.kotlin.dsl.execAndGetStdout
-import org.gradle.kotlin.dsl.property
+import org.gradle.kotlin.dsl.*
+import org.gradle.testing.PerformanceTest
 
 
-open class DetermineForkPoint : DefaultTask() {
+open class DetermineCommitBaseline : DefaultTask() {
+    companion object {
+        @JvmStatic
+        val COMMIT_VERSION_REGEX = """(\d+(\.\d+)+)-commit-[a-f0-9]+""".toRegex()
+    }
+
     @Internal
-    val forkPointDistributionVersion = project.objects.property<String>()
+    val commitBaselineVersion = project.objects.property<String>()
 
     @TaskAction
-    fun determineForkPoint() {
+    fun determineCommitBaseline() {
+        val explicitCommitBaseline = explicitlySetCommitBaseline()
+        if (explicitCommitBaseline != null) {
+            commitBaselineVersion.set(explicitCommitBaseline)
+        } else if (!currentBranchIsMasterOrRelease()) {
+            commitBaselineVersion.set(forkPointCommitBaseline())
+            project.tasks.withType(PerformanceTest::class) {
+                baselines = commitBaselineVersion.get()
+            }
+        } else {
+            project.tasks.withType(BuildCommitDistribution::class) {
+                enabled = false
+            }
+        }
+    }
+
+    private
+    fun currentBranchIsMasterOrRelease() =
+        when (project.execAndGetStdout("git", "rev-parse", "--abbrev-ref", "HEAD")) {
+            "master" -> true
+            "release" -> true
+            else -> false
+        }
+
+    private
+    fun explicitlySetCommitBaseline() =
+        project.tasks
+            .withType(PerformanceTest::class)
+            .map(PerformanceTest::getBaselines)
+            .firstOrNull { true == it?.matches(COMMIT_VERSION_REGEX) }
+
+    private
+    fun forkPointCommitBaseline(): String {
         project.execAndGetStdout("git", "fetch", "origin", "master", "release")
         val masterForkPointCommit = project.execAndGetStdout("git", "merge-base", "origin/master", "HEAD")
         val releaseForkPointCommit = project.execAndGetStdout("git", "merge-base", "origin/release", "HEAD")
@@ -39,7 +76,6 @@ open class DetermineForkPoint : DefaultTask() {
                 masterForkPointCommit
         val baseVersionOnForkPoint = project.execAndGetStdout("git", "show", "$forkPointCommit:version.txt")
         val shortCommitId = project.execAndGetStdout("git", "rev-parse", "--short", forkPointCommit)
-
-        forkPointDistributionVersion.set("$baseVersionOnForkPoint-commit-$shortCommitId")
+        return "$baseVersionOnForkPoint-commit-$shortCommitId"
     }
 }

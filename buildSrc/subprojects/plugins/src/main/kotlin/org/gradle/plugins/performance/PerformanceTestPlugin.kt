@@ -26,9 +26,9 @@ import org.gradle.testing.performance.generator.tasks.AbstractProjectGeneratorTa
 import org.gradle.testing.performance.generator.tasks.JavaExecProjectGeneratorTask
 import org.gradle.testing.performance.generator.tasks.JvmProjectGeneratorTask
 import org.gradle.testing.performance.generator.tasks.ProjectGeneratorTask
-import org.gradle.testing.performance.generator.tasks.RemoteProject
 import org.gradle.testing.performance.generator.tasks.TemplateProjectGeneratorTask
 import org.gradle.kotlin.dsl.*
+import org.gradle.testing.performance.generator.tasks.RemoteProject
 
 import org.w3c.dom.Document
 import java.io.File
@@ -36,7 +36,6 @@ import javax.xml.parsers.DocumentBuilderFactory
 import kotlin.reflect.KClass
 
 
-private
 object PropertyNames {
     const val dbUrl = "org.gradle.performance.db.url"
     const val dbUsername = "org.gradle.performance.db.username"
@@ -78,18 +77,22 @@ class PerformanceTestPlugin : Plugin<Project> {
     override fun apply(project: Project): Unit = project.run {
         apply(plugin = "java")
 
-        registerForkPointDistributionTask()
-
         val performanceTestSourceSet = createPerformanceTestSourceSet()
         addConfigurationAndDependencies()
         createCheckNoIdenticalBuildFilesTask()
         configureGeneratorTasks()
 
         val prepareSamplesTask = createPrepareSamplesTask()
+        val forkPointDistributionTask = createForkPointDistributionTask()
+
         createCleanSamplesTask()
 
-        createLocalPerformanceTestTasks(performanceTestSourceSet, prepareSamplesTask)
-        createDistributedPerformanceTestTasks(performanceTestSourceSet, prepareSamplesTask)
+        createLocalPerformanceTestTasks(performanceTestSourceSet)
+        createDistributedPerformanceTestTasks(performanceTestSourceSet)
+
+        tasks.withType<PerformanceTest>().configureEach {
+            dependsOn(prepareSamplesTask, forkPointDistributionTask)
+        }
 
         createRebaselineTask(performanceTestSourceSet)
 
@@ -97,31 +100,12 @@ class PerformanceTestPlugin : Plugin<Project> {
     }
 
     private
-    fun Project.registerForkPointDistributionTask() {
-        val determineForkPoint = tasks.register("determineForkPoint", DetermineForkPoint::class)
-        val buildForkPointDistribution = tasks.register("buildForkPointDistribution", BuildForkPointDistribution::class) {
-            forkPointDistributionVersion.set(determineForkPoint.flatMap { it.forkPointDistributionVersion })
-            dependsOn(determineForkPoint)
+    fun Project.createForkPointDistributionTask(): TaskProvider<BuildCommitDistribution> {
+        val determineCommitBaseline = tasks.register("determineCommitBaseline", DetermineCommitBaseline::class)
+        return tasks.register("buildCommitDistribution", BuildCommitDistribution::class) {
+            commitDistributionVersion.set(determineCommitBaseline.flatMap { it.commitBaselineVersion })
+            dependsOn(determineCommitBaseline)
         }
-
-        tasks.register("configurePerformanceTestBaseline") {
-            dependsOn(buildForkPointDistribution)
-            doLast {
-                val commitBaseline = determineForkPoint.get().forkPointDistributionVersion.get()
-                project.tasks.withType(DistributedPerformanceTest::class) {
-                    if (baselines.isNullOrEmpty() || baselines == "defaults") {
-                        baselines = commitBaseline
-                    }
-                }
-            }
-        }
-    }
-
-    private
-    fun Project.whenNotOnMasterOrReleaseBranch(action: (branchName: String) -> Unit) {
-        stringPropertyOrNull(PropertyNames.branchName)
-            ?.takeIf { it.isNotEmpty() && it != "master" && it != "release" }
-            ?.let(action)
     }
 
     private
@@ -250,12 +234,11 @@ class PerformanceTestPlugin : Plugin<Project> {
 
     private
     fun Project.createLocalPerformanceTestTasks(
-        performanceSourceSet: SourceSet,
-        prepareSamplesTask: TaskProvider<Task>
+        performanceSourceSet: SourceSet
     ) {
 
         fun create(name: String, configure: PerformanceTest.() -> Unit = {}) {
-            createLocalPerformanceTestTask(name, performanceSourceSet, prepareSamplesTask).configure(configure)
+            createLocalPerformanceTestTask(name, performanceSourceSet).configure(configure)
         }
 
         create("performanceTest") {
@@ -277,12 +260,11 @@ class PerformanceTestPlugin : Plugin<Project> {
 
     private
     fun Project.createDistributedPerformanceTestTasks(
-        performanceSourceSet: SourceSet,
-        prepareSamplesTask: TaskProvider<Task>
+        performanceSourceSet: SourceSet
     ) {
 
         fun create(name: String, configure: PerformanceTest.() -> Unit = {}) {
-            createDistributedPerformanceTestTask(name, performanceSourceSet, prepareSamplesTask).configure(configure)
+            createDistributedPerformanceTestTask(name, performanceSourceSet).configure(configure)
         }
 
         create("distributedPerformanceTest") {
@@ -332,12 +314,11 @@ class PerformanceTestPlugin : Plugin<Project> {
     private
     fun Project.createDistributedPerformanceTestTask(
         name: String,
-        performanceSourceSet: SourceSet,
-        prepareSamplesTask: TaskProvider<Task>
+        performanceSourceSet: SourceSet
     ): TaskProvider<DistributedPerformanceTest> {
 
         val result = tasks.register(name, DistributedPerformanceTest::class) {
-            configureForAnyPerformanceTestTask(this, performanceSourceSet, prepareSamplesTask)
+            configureForAnyPerformanceTestTask(this, performanceSourceSet)
             scenarioList = buildDir / Config.performanceTestScenarioListFileName
             buildTypeId = stringPropertyOrNull(PropertyNames.buildTypeId)
             workerTestTaskName = stringPropertyOrNull(PropertyNames.workerTestTaskName) ?: "fullPerformanceTest"
@@ -361,11 +342,10 @@ class PerformanceTestPlugin : Plugin<Project> {
     private
     fun Project.createLocalPerformanceTestTask(
         name: String,
-        performanceSourceSet: SourceSet,
-        prepareSamplesTask: TaskProvider<Task>
+        performanceSourceSet: SourceSet
     ): TaskProvider<out PerformanceTest> {
         val performanceTest = tasks.register(name, determineLocalPerformanceTestClass()) {
-            configureForAnyPerformanceTestTask(this, performanceSourceSet, prepareSamplesTask)
+            configureForAnyPerformanceTestTask(this, performanceSourceSet)
 
             if (project.hasProperty(PropertyNames.performanceTestVerbose)) {
                 testLogging.showStandardStreams = true
@@ -418,8 +398,7 @@ class PerformanceTestPlugin : Plugin<Project> {
     private
     fun Project.configureForAnyPerformanceTestTask(
         task: PerformanceTest,
-        performanceSourceSet: SourceSet,
-        prepareSamplesTask: TaskProvider<Task>
+        performanceSourceSet: SourceSet
     ) {
 
         task.apply {
@@ -438,16 +417,10 @@ class PerformanceTestPlugin : Plugin<Project> {
 
             jvmArgs("-Xmx5g", "-XX:+HeapDumpOnOutOfMemoryError")
 
-            dependsOn(prepareSamplesTask)
-
             registerTemplateInputsToPerformanceTest()
 
             configureSampleGenerators {
                 this@apply.mustRunAfter(this)
-            }
-
-            whenNotOnMasterOrReleaseBranch {
-                this@apply.dependsOn("configurePerformanceTestBaseline")
             }
         }
 
