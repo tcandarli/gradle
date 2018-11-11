@@ -51,13 +51,14 @@ object PropertyNames {
 }
 
 
-val COMMIT_VERSION_REGEX = """(\d+(\.\d+)+)-commit-[a-f0-9]+""".toRegex()
+private
+val commitVersionRegex = """(\d+(\.\d+)+)-commit-[a-f0-9]+""".toRegex()
 
 
 private
 object Config {
 
-    val baseLineList = listOf("1.1", "1.12", "2.0", "2.1", "2.4", "2.9", "2.12", "2.14.1", "last")
+    val baseLineList = listOf("1.1", "1.12", "2.0", "2.1", "2.4", "2.9", "2.12", "2.14.1", "last").toString()
 
     const val performanceTestScenarioListFileName = "performance-tests/scenario-list.csv"
 
@@ -85,7 +86,7 @@ class PerformanceTestPlugin : Plugin<Project> {
         configureGeneratorTasks()
 
         val prepareSamplesTask = createPrepareSamplesTask()
-        val configurePerformanceTestBaseline = createForkPointDistributionTask()
+        val configurePerformanceTestBaseline = createConfigurePerformanceTestBaselineTask()
 
         createCleanSamplesTask()
 
@@ -102,24 +103,21 @@ class PerformanceTestPlugin : Plugin<Project> {
     }
 
     private
-    fun Project.createForkPointDistributionTask(): TaskProvider<Task> {
+    fun Project.createConfigurePerformanceTestBaselineTask(): TaskProvider<Task> {
+        val forkPointCommitRequired = { _: Task -> !currentBranchIsMasterOrRelease() && allPerformanceTestsHaveDefaultBaselines() }
         val determineForkPointCommit = tasks.register("determineForkPointCommit", DetermineForkPointCommitBaseline::class) {
-            onlyIf {
-                !currentBranchIsMasterOrRelease() && allPerformanceTestsHaveDefaultBaselines()
-            }
+            onlyIf(forkPointCommitRequired)
         }
         val buildCommitDistribution = tasks.register("buildCommitDistribution", BuildCommitDistribution::class) {
             commitDistributionVersion.set(determineForkPointCommit.flatMap { it.forkPointCommitBaselineVersion })
             dependsOn(determineForkPointCommit)
             onlyIf {
-                anyPerformanceTestHasCommitBaseline() || (!currentBranchIsMasterOrRelease() && allPerformanceTestsHaveDefaultBaselines())
+                anyPerformanceTestHasCommitBaseline() || forkPointCommitRequired.invoke(it)
             }
         }
         return tasks.register("configurePerformanceTestBaseline") {
             dependsOn(buildCommitDistribution)
-            onlyIf {
-                !currentBranchIsMasterOrRelease() && allPerformanceTestsHaveDefaultBaselines()
-            }
+            onlyIf(forkPointCommitRequired)
             doLast {
                 project.tasks.withType(PerformanceTest::class) {
                     baselines = determineForkPointCommit.get().forkPointCommitBaselineVersion.get()
@@ -130,11 +128,11 @@ class PerformanceTestPlugin : Plugin<Project> {
 
     private
     fun Project.allPerformanceTestsHaveDefaultBaselines() =
-        tasks.withType(PerformanceTest::class).toList().all { it.baselines.isNullOrEmpty() || it.baselines == "defaults" }
+        tasks.withType(PerformanceTest::class).toList().all { it.baselines.isNullOrEmpty() || it.baselines == "defaults" || it.baselines == Config.baseLineList }
 
     private
     fun Project.anyPerformanceTestHasCommitBaseline() =
-        tasks.withType(PerformanceTest::class).any { it.baselines?.matches(COMMIT_VERSION_REGEX) == true }
+        tasks.withType(PerformanceTest::class).any { it.baselines?.matches(commitVersionRegex) == true }
 
     private
     fun Project.currentBranchIsMasterOrRelease() =
@@ -312,7 +310,7 @@ class PerformanceTestPlugin : Plugin<Project> {
             channel = "experiments"
         }
         create("distributedFullPerformanceTest") {
-            baselines = Config.baseLineList.toString()
+            baselines = Config.baseLineList
             checks = "none"
             channel = "historical"
         }
