@@ -16,6 +16,7 @@
 
 package org.gradle.plugins.performance
 
+import org.gradle.api.DefaultTask
 import org.gradle.api.internal.GradleInternal
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.Optional
@@ -24,11 +25,11 @@ import org.gradle.api.tasks.OutputFile
 import org.gradle.api.tasks.TaskAction
 import org.gradle.caching.http.HttpBuildCache
 import org.gradle.kotlin.dsl.*
-import org.gradle.testing.performance.generator.tasks.KotlinExtendsGroovyWorkaround
+import org.gradle.testing.performance.generator.tasks.RemoteProject
 import java.io.File
 
 
-open class BuildCommitDistribution : KotlinExtendsGroovyWorkaround() {
+open class BuildCommitDistribution : DefaultTask() {
     // 5.1-commit-1a2b3c4d5e
     @Input
     @Optional
@@ -41,15 +42,15 @@ open class BuildCommitDistribution : KotlinExtendsGroovyWorkaround() {
     val commitDistributionToolingApiJar = project.objects.fileProperty()
 
     init {
-        remoteUri = project.rootProject.rootDir.absolutePath
-        ref.set(commitDistributionVersion.map { it.substring(it.lastIndexOf('-') + 1) })
         commitDistributionHome.set(project.rootProject.layout.buildDirectory.dir(commitDistributionVersion.map { "distributions/gradle-$it" }))
         commitDistributionToolingApiJar.set(project.rootProject.layout.buildDirectory.file(commitDistributionVersion.map { "distributions/gradle-tooling-api-$it.jar" }))
     }
 
     @TaskAction
     fun buildCommitDistribution() {
-        tryBuildDistribution(checkout())
+        val rootProjectDir = project.rootProject.rootDir.absolutePath
+        val commit = commitDistributionVersion.map { it.substring(it.lastIndexOf('-') + 1) }
+        tryBuildDistribution(RemoteProject.checkout(this, rootProjectDir, commit.orNull, null))
         println("Building the commit distribution succeeded, now the baseline is ${commitDistributionVersion.get()}")
     }
 

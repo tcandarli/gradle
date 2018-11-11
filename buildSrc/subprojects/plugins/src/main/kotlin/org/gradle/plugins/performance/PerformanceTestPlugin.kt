@@ -13,23 +13,22 @@ import org.gradle.api.tasks.TaskProvider
 import org.gradle.api.tasks.bundling.Zip
 import org.gradle.api.tasks.testing.junit.JUnitOptions
 import org.gradle.internal.hash.HashUtil
+import org.gradle.kotlin.dsl.*
 import org.gradle.plugins.ide.eclipse.EclipsePlugin
 import org.gradle.plugins.ide.eclipse.model.EclipseModel
 import org.gradle.plugins.ide.idea.IdeaPlugin
 import org.gradle.plugins.ide.idea.model.IdeaModel
+import org.gradle.testing.BuildScanPerformanceTest
 import org.gradle.testing.DistributedPerformanceTest
 import org.gradle.testing.PerformanceTest
-import org.gradle.testing.ReportGenerationPerformanceTest
-import org.gradle.testing.BuildScanPerformanceTest
 import org.gradle.testing.RebaselinePerformanceTests
+import org.gradle.testing.ReportGenerationPerformanceTest
 import org.gradle.testing.performance.generator.tasks.AbstractProjectGeneratorTask
 import org.gradle.testing.performance.generator.tasks.JavaExecProjectGeneratorTask
 import org.gradle.testing.performance.generator.tasks.JvmProjectGeneratorTask
 import org.gradle.testing.performance.generator.tasks.ProjectGeneratorTask
-import org.gradle.testing.performance.generator.tasks.TemplateProjectGeneratorTask
-import org.gradle.kotlin.dsl.*
 import org.gradle.testing.performance.generator.tasks.RemoteProject
-
+import org.gradle.testing.performance.generator.tasks.TemplateProjectGeneratorTask
 import org.w3c.dom.Document
 import java.io.File
 import javax.xml.parsers.DocumentBuilderFactory
@@ -50,6 +49,9 @@ object PropertyNames {
     const val teamCityUsername = "teamCityUsername"
     const val teamCityPassword = "teamCityPassword"
 }
+
+
+val COMMIT_VERSION_REGEX = """(\d+(\.\d+)+)-commit-[a-f0-9]+""".toRegex()
 
 
 private
@@ -83,7 +85,7 @@ class PerformanceTestPlugin : Plugin<Project> {
         configureGeneratorTasks()
 
         val prepareSamplesTask = createPrepareSamplesTask()
-        val forkPointDistributionTask = createForkPointDistributionTask()
+        val configurePerformanceTestBaseline = createForkPointDistributionTask()
 
         createCleanSamplesTask()
 
@@ -91,7 +93,7 @@ class PerformanceTestPlugin : Plugin<Project> {
         createDistributedPerformanceTestTasks(performanceTestSourceSet)
 
         tasks.withType<PerformanceTest>().configureEach {
-            dependsOn(prepareSamplesTask, forkPointDistributionTask)
+            dependsOn(prepareSamplesTask, configurePerformanceTestBaseline)
         }
 
         createRebaselineTask(performanceTestSourceSet)
@@ -100,13 +102,47 @@ class PerformanceTestPlugin : Plugin<Project> {
     }
 
     private
-    fun Project.createForkPointDistributionTask(): TaskProvider<BuildCommitDistribution> {
-        val determineCommitBaseline = tasks.register("determineCommitBaseline", DetermineCommitBaseline::class)
-        return tasks.register("buildCommitDistribution", BuildCommitDistribution::class) {
-            commitDistributionVersion.set(determineCommitBaseline.flatMap { it.commitBaselineVersion })
-            dependsOn(determineCommitBaseline)
+    fun Project.createForkPointDistributionTask(): TaskProvider<Task> {
+        val determineForkPointCommit = tasks.register("determineForkPointCommit", DetermineForkPointCommitBaseline::class) {
+            onlyIf {
+                !currentBranchIsMasterOrRelease() && allPerformanceTestsHaveDefaultBaselines()
+            }
+        }
+        val buildCommitDistribution = tasks.register("buildCommitDistribution", BuildCommitDistribution::class) {
+            commitDistributionVersion.set(determineForkPointCommit.flatMap { it.forkPointCommitBaselineVersion })
+            dependsOn(determineForkPointCommit)
+            onlyIf {
+                anyPerformanceTestHasCommitBaseline() || (!currentBranchIsMasterOrRelease() && allPerformanceTestsHaveDefaultBaselines())
+            }
+        }
+        return tasks.register("configurePerformanceTestBaseline") {
+            dependsOn(buildCommitDistribution)
+            onlyIf {
+                !currentBranchIsMasterOrRelease() && allPerformanceTestsHaveDefaultBaselines()
+            }
+            doLast {
+                project.tasks.withType(PerformanceTest::class) {
+                    baselines = determineForkPointCommit.get().forkPointCommitBaselineVersion.get()
+                }
+            }
         }
     }
+
+    private
+    fun Project.allPerformanceTestsHaveDefaultBaselines() =
+        tasks.withType(PerformanceTest::class).toList().all { it.baselines.isNullOrEmpty() || it.baselines == "defaults" }
+
+    private
+    fun Project.anyPerformanceTestHasCommitBaseline() =
+        tasks.withType(PerformanceTest::class).any { it.baselines?.matches(COMMIT_VERSION_REGEX) == true }
+
+    private
+    fun Project.currentBranchIsMasterOrRelease() =
+        when (stringPropertyOrNull(PropertyNames.branchName)) {
+            "master" -> true
+            "release" -> true
+            else -> false
+        }
 
     private
     fun Project.createRebaselineTask(performanceTestSourceSet: SourceSet) {
